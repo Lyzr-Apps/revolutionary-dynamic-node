@@ -107,20 +107,21 @@ function App() {
     setSelectedMaterial(type);
 
     try {
+      console.log(`Starting ${type} generation with agent ${STUDY_AGENT_ID}`);
+
       const userId = `user${Date.now()}@test.com`;
       const sessionId = `session${Date.now()}`;
 
       let agentMessage;
       switch (type) {
         case 'flashcards':
-          agentMessage = `Generate exactly 8 flashcards from these notes: ${notes}
+          agentMessage = `Create exactly 6 flashcards in JSON format from these notes. Each flashcard must have a "question" and "answer" field. Notes: ${notes}
 
-Format: Return ONLY a JSON array.
+Return ONLY this exact JSON format:
 [
-  {"question": "Q1?", "answer": "A1"},
-  {"question": "Q2?", "answer": "A2"}
-]
-No markdown, no explanations, just JSON.`;
+  {"question": "Q1", "answer": "A1"},
+  {"question": "Q2", "answer": "A2"}
+]`;
           break;
         case 'mcqs':
           agentMessage = `Generate exactly 8 multiple choice questions from these notes: ${notes}
@@ -151,6 +152,8 @@ No markdown, no explanations, just JSON.`;
           break;
       }
 
+      console.log('Requesting from agent:', agentMessage.substring(0, 200));
+
       const response = await fetch('https://agent-prod.studio.lyzr.ai/v3/inference/chat/', {
         method: 'POST',
         headers: {
@@ -165,8 +168,13 @@ No markdown, no explanations, just JSON.`;
         }),
       });
 
-      const data = await response.json();
+      const responseText = await response.text();
+      console.log('Raw agent response:', responseText);
+
+      const data = JSON.parse(responseText);
       const content = data.response || data.message || data.content;
+
+      console.log('Processed content:', content);
 
       if (!content) {
         throw new Error('Study agent returned empty response');
@@ -175,20 +183,40 @@ No markdown, no explanations, just JSON.`;
       let parsedData;
       try {
         parsedData = parseLLMJson(content);
+        console.log('Parsed with LLM JSON parser:', parsedData);
       } catch (e) {
+        console.log('LLM JSON parser failed, trying markdown extraction');
         // Try extracting JSON from markdown
         const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/);
         if (jsonMatch) {
           parsedData = parseLLMJson(jsonMatch[1]);
+          console.log('Parsed from markdown:', parsedData);
         } else {
+          console.log('No markdown found, trying fallback parsing');
           // Try fallback parsing
           parsedData = await parseAgentContent(content, type);
         }
       }
 
+      console.log(`Final parsed data for ${type}:`, parsedData);
+
       if (type === 'flashcards') {
         const result = Array.isArray(parsedData) ? parsedData : parsedData.flashcards || [];
-        setFlashcards(result);
+        console.log(`Setting ${result.length} flashcards`);
+
+        // Validate flashcard structure
+        const validFlashcards = result.filter(card =>
+          card &&
+          typeof card === 'object' &&
+          card.question &&
+          card.answer &&
+          typeof card.question === 'string' &&
+          typeof card.answer === 'string'
+        );
+
+        console.log(`Valid flashcards: ${validFlashcards.length}`);
+        setFlashcards(validFlashcards);
+
       } else if (type === 'mcqs') {
         const result = Array.isArray(parsedData) ? parsedData : parsedData.mcqs || [];
         setMcqs(result);
@@ -200,10 +228,16 @@ No markdown, no explanations, just JSON.`;
     } catch (error) {
       console.error('Study material agent error:', error);
       const demoData = await generateDemoData(type);
+      console.log('Generated demo data:', demoData);
 
-      if (type === 'flashcards') setFlashcards(demoData);
-      else if (type === 'mcqs') setMcqs(demoData);
-      else if (type === 'mocktest') setMockTest(demoData);
+      if (type === 'flashcards') {
+        setFlashcards(demoData);
+        console.log('Using demo flashcards');
+      } else if (type === 'mcqs') {
+        setMcqs(demoData);
+      } else if (type === 'mocktest') {
+        setMockTest(demoData);
+      }
 
       alert('Agent not responding. Generated demo materials for testing.');
     } finally {
@@ -244,6 +278,12 @@ No markdown, no explanations, just JSON.`;
     }
 
     return [];
+  };
+
+  const parseAgentContent = async (content: string, type: MaterialType): Promise<any[]> => {
+    // If direct JSON parsing fails, try extracting structured data from text
+    console.log(`Attempting fallback extraction for ${type}`);
+    return await extractFromText(content, type);
   };
 
   const generateDemoData = async (type: MaterialType): Promise<any[]> => {
@@ -381,61 +421,83 @@ No markdown, no explanations, just JSON.`;
     URL.revokeObjectURL(url);
   };
 
-  const renderFlashcardView = () => (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <span className="text-sm font-medium text-gray-600">
-          Flashcard {activeFlashcard + 1} of {flashcards.length}
-        </span>
-        <div className="flex space-x-2">
-          <button
-            onClick={() => setActiveFlashcard(Math.max(0, activeFlashcard - 1))}
-            disabled={activeFlashcard === 0}
-            className="px-3 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            ← Previous
-          </button>
-          <button
-            onClick={() => setActiveFlashcard(Math.min(flashcards.length - 1, activeFlashcard + 1))}
-            disabled={activeFlashcard === flashcards.length - 1}
-            className="px-3 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Next →
-          </button>
-        </div>
-      </div>
+  const renderFlashcardView = () => {
+    console.log(`Rendering flashcard view with ${flashcards.length} flashcards`);
 
-      <div className="bg-white rounded-xl shadow-lg p-8 relative overflow-hidden">
-        <div className="z-10 relative">
+    if (!flashcards || flashcards.length === 0) {
+      console.log("No flashcards to display");
+      return (
+        <div className="text-center text-gray-500 p-8">
+          <p>No flashcards available</p>
+          <p className="text-sm">Agent may have returned empty response</p>
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between bg-white rounded-lg p-4 mb-6 shadow-md">
+          <span className="text-sm font-medium text-gray-600">
+            Flashcard {activeFlashcard + 1} of {flashcards.length}
+          </span>
+          <div className="flex space-x-2">
+            <button
+              onClick={() => setActiveFlashcard(Math.max(0, activeFlashcard - 1))}
+              disabled={activeFlashcard === 0}
+              className="px-3 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              ← Previous
+            </button>
+            <button
+              onClick={() => setActiveFlashcard(Math.min(flashcards.length - 1, activeFlashcard + 1))}
+              disabled={activeFlashcard === flashcards.length - 1}
+              className="px-3 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Next →
+            </button>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl shadow-lg p-8">
           <div className="text-center">
             <div className="mb-6">
               <h3 className="text-xl font-bold text-gray-800 mb-4">Question</h3>
               <p className="text-lg text-gray-700 leading-relaxed">{flashcards[activeFlashcard].question}</p>
             </div>
 
-            <button
+                        <button
               onClick={(e) => {
-                const answer = e.currentTarget.nextElementSibling as HTMLElement;
-                if (answer.style.display === 'none' || !answer.style.display) {
-                  answer.style.display = 'block';
-                } else {
-                  answer.style.display = 'none';
+                e.preventDefault();
+                e.stopPropagation();
+                console.log('Show Answer button clicked');
+                const answerDiv = document.getElementById('answer-container');
+                const btn = document.getElementById('show-answer-btn');
+                if (answerDiv) {
+                  if (answerDiv.classList.contains('hidden')) {
+                    console.log('Showing answer');
+                    answerDiv.classList.remove('hidden');
+                    btn.textContent = 'Hide Answer';
+                  } else {
+                    console.log('Hiding answer');
+                    answerDiv.classList.add('hidden');
+                    btn.textContent = 'Show Answer';
+                  }
                 }
               }}
-              className="px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 font-medium transition-colors mb-6"
+              className="px-6 py-3 bg-blue-400 text-white rounded-lg hover:bg-blue-500 font-medium transition-colors mb-6 mx-auto block"
             >
               Show Answer
             </button>
 
-            <div style={{ display: 'none' }}>
+            <div id="answer-container" className="hidden">
               <h3 className="text-xl font-bold text-gray-800 mb-4">Answer</h3>
               <p className="text-lg text-gray-700 leading-relaxed">{flashcards[activeFlashcard].answer}</p>
             </div>
           </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const renderMCQView = () => (
     <div className="space-y-6">
