@@ -85,6 +85,14 @@ function App() {
     setSelectedMaterial(type);
 
     try {
+      console.log(`Calling study agent ${STUDY_AGENT_ID} to generate ${type}...`);
+
+      const userId = `user${Date.now()}@test.com`;
+      const sessionId = `session${Date.now()}`;
+      const agentMessage = `Generate ${type} from these notes: ${notes}`;
+
+      console.log(`Request payload:`, { userId, sessionId, message: agentMessage });
+
       const response = await fetch('https://agent-prod.studio.lyzr.ai/v3/inference/chat/', {
         method: 'POST',
         headers: {
@@ -92,35 +100,142 @@ function App() {
           'x-api-key': API_KEY,
         },
         body: JSON.stringify({
-          user_id: `${generateRandomString()}@test.com`,
+          user_id: userId,
           agent_id: STUDY_AGENT_ID,
-          session_id: `${STUDY_AGENT_ID}-${generateRandomString()}`,
-          message: `Generate ${type} from these notes: ${notes}`,
+          session_id: sessionId,
+          message: agentMessage,
         }),
       });
 
-      const data = await response.json();
+      const responseText = await response.text();
+      console.log(`Raw response: ${responseText}`);
+
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch (e) {
+        console.error('Failed to parse response as JSON:', responseText);
+        throw new Error('Invalid response format from agent');
+      }
+
       const content = data.response || data.message || data.content;
 
+      if (!content || content.trim().length === 0) {
+        console.warn('Empty response from agent');
+        throw new Error('Empty response from agent');
+      }
+
+      console.log(`Agent response content: ${content}`);
+
+      // Try to parse as JSON, fallback to structured extraction
       let parsedData;
       try {
         parsedData = parseLLMJson(content);
-      } catch {
-        parsedData = eval(`(${content})`);
+      } catch (parseError) {
+        console.warn('Failed to parse JSON, trying structured extraction');
+        try {
+          // Try to extract JSON from markdown code blocks
+          const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/);
+          if (jsonMatch) {
+            parsedData = parseLLMJson(jsonMatch[1]);
+          } else {
+            // Try to create structured data from text
+            parsedData = await extractStructuredData(content, type);
+          }
+        } catch (extractError) {
+          console.error('Failed to extract structured data:', extractError);
+          throw extractError;
+        }
       }
 
+      console.log(`Parsed data:`, parsedData);
+
       if (type === 'flashcards') {
-        setFlashcards(Array.isArray(parsedData) ? parsedData : parsedData.flashcards || []);
+        const result = Array.isArray(parsedData) ? parsedData : parsedData.flashcards || [];
+        setFlashcards(result);
+        console.log(`Generated ${result.length} flashcards`);
       } else if (type === 'mcqs') {
-        setMcqs(Array.isArray(parsedData) ? parsedData : parsedData.mcqs || []);
+        const result = Array.isArray(parsedData) ? parsedData : parsedData.mcqs || [];
+        setMcqs(result);
+        console.log(`Generated ${result.length} MCQs`);
       } else if (type === 'mocktest') {
-        setMockTest(Array.isArray(parsedData) ? parsedData : parsedData.mockTest || []);
+        const result = Array.isArray(parsedData) ? parsedData : parsedData.mockTest || [];
+        setMockTest(result);
+        console.log(`Generated ${result.length} mock test questions`);
       }
     } catch (error) {
       console.error('Error generating study material:', error);
-      alert('Error generating study material. Please try again.');
+      alert('Error generating study material. Check browser console for details.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const extractStructuredData = async (content: string, type: MaterialType): Promise<any[]> => {
+    // Fallback: manually parse structured content
+    if (type === 'flashcards') {
+      const cards = [];
+      const lines = content.split('\n');
+      let currentCard: any = {};
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line.includes('Question:') || line.includes('Q:')) {
+          currentCard.question = line.replace(/^(Question|Q|Problem):/i, '').trim();
+        } else if (line.includes('Answer:') || line.includes('A:')) {
+          currentCard.answer = line.replace(/^(Answer|A|Solution):/i, '').trim();
+          if (currentCard.question && currentCard.answer) {
+            cards.push({ ...currentCard });
+            currentCard = {};
+          }
+        }
+      }
+      return cards.length > 0 ? cards : [{ question: "Sample question", answer: "Sample answer" }];
+    } else if (type === 'mcqs') {
+      const mcqs = [];
+      const lines = content.split('\n');
+      let currentMCQ: any = {};
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line.includes('Question:') || line.includes('Q:')) {
+          currentMCQ = { question: line.replace(/^(Question|Q):/i, '').trim(), options: [] };
+        } else if (line.match(/^[A-D]\./) || line.includes('.')) {
+          const option = line.replace(/^[A-D]\./, '').trim();
+          currentMCQ.options.push(option);
+        } else if (line.includes('Answer:') || line.includes('Correct:')) {
+          currentMCQ.correctAnswer = line.replace(/^(Answer|Correct):/i, '').trim();
+          if (currentMCQ.question && currentMCQ.options && currentMCQ.options.length > 0 && currentMCQ.correctAnswer) {
+            mcqs.push({ ...currentMCQ });
+            currentMCQ = {};
+          }
+        }
+      }
+      return mcqs.length > 0 ? mcqs : [];
+    } else {
+      // mocktest - same as mcqs but with explanations
+      const questions = [];
+      const lines = content.split('\n');
+      let currentQuestion: any = {};
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line.includes('Question:') || line.includes('Q:')) {
+          currentQuestion = { question: line.replace(/^(Question|Q):/i, '').trim(), options: [] };
+        } else if (line.match(/^[A-D]\./) || line.includes('.')) {
+          const option = line.replace(/^[A-D]\./, '').trim();
+          currentQuestion.options.push(option);
+        } else if (line.includes('Answer:') || line.includes('Correct:')) {
+          currentQuestion.correctAnswer = line.replace(/^(Answer|Correct):/i, '').trim();
+        } else if (line.includes('Explanation:')) {
+          currentQuestion.explanation = line.replace(/^Explanation:/i, '').trim();
+          if (currentQuestion.question && currentQuestion.options && currentQuestion.options.length > 0 && currentQuestion.correctAnswer && currentQuestion.explanation) {
+            questions.push({ ...currentQuestion });
+            currentQuestion = {};
+          }
+        }
+      }
+      return questions.length > 0 ? questions : [];
     }
   };
 
